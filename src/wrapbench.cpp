@@ -1,3 +1,17 @@
+// wrapbench - a benchmark for DirectDraw / Direct3D 1-7 wrappers
+// Copyright (C) 2026 Neth
+//
+// This program is free software: you can redistribute it and/or modify it under the terms of
+// the GNU General Public License as published by the Free Software Foundation, either version
+// 3 of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+// without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+// See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with this program.
+// If not, see <https://www.gnu.org/licenses/>.
+//
 // wrapbench: a benchmark for DirectDraw wrappers (dd2d9, dgVoodoo, DDrawCompat, cnc-ddraw,
 // Wine's own, Windows' own ...). Every test uses only the public DirectDraw / Direct3D 1-7
 // interfaces, the way games of the era did, so the same .exe measures whichever ddraw.dll
@@ -27,6 +41,8 @@
 #include <vector>
 
 namespace {
+
+constexpr char kVersion[] = "1.0.0";
 
 // ---------------------------------------------------------------- settings and results
 
@@ -270,7 +286,9 @@ void Run(int number, const char* name, const char* what, Loop& l) {
     }
     const bool coarseHere = zeros && smallest < 1e9 && g_tick <= 0.00005;
     if (zeros && smallest < 1e9) tick = std::max(tick, smallest);
-    const double minRun = tick > 0.00005 ? std::max(20 * tick, 0.01) : 0.0;
+    // (A coarse clock found from the frames: runs of at least 0.1 s too, the smallest step
+    // seen being possibly an odd short one.)
+    const double minRun = tick > 0.00005 ? std::max({20 * tick, 0.01, zeros ? 0.1 : 0.0}) : 0.0;
     double runTime = 0.0;
     int runFrames = 0;
     for (double d : times) {
@@ -304,6 +322,11 @@ void Run(int number, const char* name, const char* what, Loop& l) {
         slowTime += weight[order[k]] * spans[order[k]];
     }
     const double worst = *std::max_element(times.begin(), times.end());
+    if (failed && FAILED(flipHr) && g_why.empty()) {
+        char b[48];
+        snprintf(b, sizeof(b), "Flip: 0x%08lx", static_cast<unsigned long>(flipHr));
+        g_why = b;
+    }
     std::string note = failed ? "  (stopped: " + (g_why.empty() ? std::string("error") : g_why) + ")" : g_skip ? "  (skipped)" : "";
     if (vsyncForced) note += "  (Flip refused DDFLIP_NOVSYNC: flipped with vsync)";
     if (coarseHere) note += "  (the clock moved in steps: median and 1% low over runs of frames)";
@@ -493,7 +516,7 @@ struct DD7 {
         fx.dwSize = sizeof(fx);
         fx.dwFillColor = color;
         RECT c = r;
-        back->Blt(&c, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+        Ck("Blt (colour fill)", back->Blt(&c, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx));
     }
     void Counter2D(const std::vector<Rc>& rects) {
         const DWORD white = Color(255, 255, 255), black = Color(0, 0, 0);
@@ -553,7 +576,7 @@ void Test2D(int number, const char* name, int bpp, const char* what,
     g_why.clear();
     DD7 d;
     if (!d.Open(bpp, false) || (setup && !setup(d))) {
-        Out("%02d %-12s FAILED to set up %dx%dx%d (%s)   %s", number, name, g_set.w, g_set.h, bpp, g_why.c_str(), what);
+        Out("%02d %-12s FAILED to set up %dx%dx%d (%s)   %s", number, name, g_set.w, g_set.h, bpp, g_why.empty() ? "a step without an error code" : g_why.c_str(), what);
         return;
     }
     Loop l;
@@ -589,7 +612,7 @@ void Tests2D() {
             const int x = int((W - 32) * (0.5 + 0.5 * sin(a * 1.3 + i * 0.37)));
             const int y = int((H - 32) * (0.5 + 0.5 * cos(a * 0.9 + i * 0.61)));
             RECT src = {0, 0, 32, 32};
-            d.back->BltFast(x, y, sprite, &src, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT);
+            Ck("BltFast (colour-keyed)", d.back->BltFast(x, y, sprite, &src, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT));
         }
     };
     Test2D(2, "2d-sprites", bpp, "clear + 2000 colour-keyed 32x32 BltFast sprites a frame",
@@ -610,7 +633,7 @@ void Tests2D() {
                    const int w = std::max(8, int(W * s)), h = std::max(8, int(H * s));
                    const int x = Rand(W - w + 1), y = Rand(H - h + 1);
                    RECT dst = {x, y, x + w, y + h};
-                   d.back->Blt(&dst, pic, nullptr, DDBLT_WAIT, nullptr);
+                   Ck("Blt (stretched)", d.back->Blt(&dst, pic, nullptr, DDBLT_WAIT, nullptr));
                }
                return true;
            },
@@ -668,7 +691,7 @@ void Tests2D() {
                    const int v = (i + f) & 255;
                    e[i] = {BYTE(v), BYTE((v * 2) & 255), BYTE(255 - v), 0};
                }
-               d.pal->SetEntries(0, 1, 254, e);
+               Ck("SetEntries", d.pal->SetEntries(0, 1, 254, e));
                DDSURFACEDESC2 sd = {};
                sd.dwSize = sizeof(sd);
                if (!Ok("Lock", d.back->Lock(nullptr, &sd, DDLOCK_WAIT | DDLOCK_WRITEONLY, nullptr))) return false;
@@ -782,7 +805,7 @@ void Test3D7(int number, const char* name, const char* what, const std::function
     g_why.clear();
     D3D7Ctx c;
     if (!c.Open() || (setup && !setup(c))) {
-        Out("%02d %-12s FAILED to set up Direct3D 7 (%s)   %s", number, name, g_why.c_str(), what);
+        Out("%02d %-12s FAILED to set up Direct3D 7 (%s)   %s", number, name, g_why.empty() ? "a step without an error code" : g_why.c_str(), what);
         return;
     }
     std::string full = std::string(what) + " (" + c.kind + " device)";
@@ -864,7 +887,7 @@ void TestsD3D7() {
 
     // Many small draws with state changes between them (the cost per call and per change).
     D3DVERTEX quad[4] = {};
-    Test3D7(10, "d3d7-states", "3000 two-triangle draws a frame, a texture or blend state change before each", nullptr,
+    Test3D7(10, "d3d7-states", "3000 two-triangle draws a frame, the texture and three blend states set before each", nullptr,
             [&](D3D7Ctx& c, int, double t) {
                 c.Begin(0xFF000000);
                 c.dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
@@ -1065,7 +1088,7 @@ void TestD3D6(int number) {
         }
     }
     if (!ok) {
-        Out("%02d %-12s FAILED to set up Direct3D 6 (%s)   %s", number, name, g_why.c_str(), what);
+        Out("%02d %-12s FAILED to set up Direct3D 6 (%s)   %s", number, name, g_why.empty() ? "a step without an error code" : g_why.c_str(), what);
     } else {
         Mesh mesh;
         const DWORD nv = DWORD(mesh.v.size()), ni = DWORD(mesh.idx.size());
@@ -1159,7 +1182,7 @@ void TestD3D5(int number) {
         }
     }
     if (!ok) {
-        Out("%02d %-12s FAILED to set up Direct3D 5 (%s)   %s", number, name, g_why.c_str(), what);
+        Out("%02d %-12s FAILED to set up Direct3D 5 (%s)   %s", number, name, g_why.empty() ? "a step without an error code" : g_why.c_str(), what);
     } else {
         Mesh mesh;
         const DWORD nv = DWORD(mesh.v.size()), ni = DWORD(mesh.idx.size());
@@ -1335,7 +1358,7 @@ void TestExecute(int number) {
         ok = ok && SUCCEEDED(dev->CreateMatrix(&hv)) && SUCCEEDED(dev->CreateMatrix(&hp));
     }
     if (!ok) {
-        Out("%02d %-12s FAILED to set up Direct3D 1-3 (%s)   %s", number, name, g_why.c_str(), what);
+        Out("%02d %-12s FAILED to set up Direct3D 1-3 (%s)   %s", number, name, g_why.empty() ? "a step without an error code" : g_why.c_str(), what);
     } else {
         Mesh mesh;
         const DWORD nv = DWORD(mesh.v.size()), tris = DWORD(mesh.idx.size() / 3);
@@ -1540,8 +1563,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmd, int) {
     // (ddraw.dll is loaded at start-up: it is imported.)
     SYSTEMTIME st;
     GetLocalTime(&st);
-    Out("== wrapbench %04u-%02u-%02u %02u:%02u  %dx%dx%d, %.0f s a test, vsync %s", st.wYear, st.wMonth, st.wDay, st.wHour,
-        st.wMinute, g_set.w, g_set.h, g_set.bpp, g_set.seconds, g_set.vsync ? "on (asked)" : "off (asked)");
+    Out("== wrapbench %s  %04u-%02u-%02u %02u:%02u  %dx%dx%d, %.0f s a test, vsync %s", kVersion, st.wYear, st.wMonth,
+        st.wDay, st.wHour, st.wMinute, g_set.w, g_set.h, g_set.bpp, g_set.seconds, g_set.vsync ? "on (asked)" : "off (asked)");
     Out("   ddraw.dll: %s", DdrawIdentity().c_str());
     g_tick = ClockTick();
     if (g_tick > 0.00005)
