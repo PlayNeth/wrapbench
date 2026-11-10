@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+- **A coarse clock is also found from frames longer than its step.** 1.0.0 noticed a clock
+  moving in steps (3.9 ms on some Wine setups) only where frames measured no time at all. A
+  test whose frames took longer than a step (d3d7-tl: 4.5 ms a frame) measured each frame
+  as one or two whole steps, so its median and 1% low were the clock's steps (256.0 and
+  128.0 fps). Now a test whose frame times are nearly all a few values, a step apart, takes
+  its median and 1% low over runs of frames too, and says so. The average was right and is
+  unchanged.
+
 ## 1.0.0
 The first release.
 

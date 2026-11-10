@@ -42,7 +42,7 @@
 
 namespace {
 
-constexpr char kVersion[] = "1.0.0";
+constexpr char kVersion[] = "1.0.1";
 
 // ---------------------------------------------------------------- settings and results
 
@@ -127,6 +127,31 @@ double ClockTick() {
     if (steps.empty()) return 0.2;
     std::sort(steps.begin(), steps.end());
     return steps[steps.size() / 2];
+}
+
+// The clock's step as the frame times of a test show it, or 0 if they don't: with a coarse
+// clock every frame measures a whole number of steps, so a few values, far apart, hold nearly
+// all the frames (frames of 4.5 ms on a 3.9 ms clock measure 3.9 or 7.8 ms, never between).
+// A fine clock gives either values that hardly repeat or, for very short frames, repeated
+// values next to each other.
+double SteppedClock(std::vector<double> times) {
+    if (times.size() < 50) return 0.0;
+    std::sort(times.begin(), times.end());
+    // The values at least 0.5% of the frames (and two of them) measured.
+    const size_t need = std::max<size_t>(2, times.size() / 200);
+    double step = 1e9, last = 0.0;  // (0: a step is also what the smallest value is above none)
+    size_t held = 0;
+    for (size_t i = 0; i < times.size();) {
+        size_t j = i;
+        while (j < times.size() && times[j] - times[i] < 1e-9) j++;
+        if (j - i >= need) {
+            held += j - i;
+            if (times[i] > 1e-9) step = std::min(step, times[i] - last);
+            last = times[i];
+        }
+        i = j;
+    }
+    return held >= times.size() / 10 * 9 && step < 1e9 && step > 0.00005 ? step : 0.0;
 }
 
 bool Wanted(const char* name) {
@@ -276,19 +301,23 @@ void Run(int number, const char* name, const char* what, Loop& l) {
     // clock, those of runs of frames at least 20 clock ticks (and 10 ms) long, timed whole.
     std::vector<double> spans;  // seconds a frame, one entry per frame or run
     std::vector<double> weight;  // frames in it
-    // Frames that took no time at all: the clock moved in steps during this test, as large
-    // as the smallest time a frame took that it did measure.
+    // The clock moved in steps during this test: frames that took no time at all (the step
+    // is then as large as the smallest time a frame did measure), or frame times that are
+    // all a few values a step apart (SteppedClock).
     double tick = g_tick, smallest = 1e9;
     size_t zeros = 0;
     for (double d : times) {
         if (d <= 0.0) zeros++;
         else smallest = std::min(smallest, d);
     }
-    const bool coarseHere = zeros && smallest < 1e9 && g_tick <= 0.00005;
+    const double stepped = SteppedClock(times);
+    const bool steps = (zeros && smallest < 1e9) || stepped > 0.0;
+    const bool coarseHere = steps && g_tick <= 0.00005;
     if (zeros && smallest < 1e9) tick = std::max(tick, smallest);
+    tick = std::max(tick, stepped);
     // (A coarse clock found from the frames: runs of at least 0.1 s too, the smallest step
     // seen being possibly an odd short one.)
-    const double minRun = tick > 0.00005 ? std::max({20 * tick, 0.01, zeros ? 0.1 : 0.0}) : 0.0;
+    const double minRun = tick > 0.00005 ? std::max({20 * tick, 0.01, steps ? 0.1 : 0.0}) : 0.0;
     double runTime = 0.0;
     int runFrames = 0;
     for (double d : times) {
