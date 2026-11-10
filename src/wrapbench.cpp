@@ -42,7 +42,7 @@
 
 namespace {
 
-constexpr char kVersion[] = "1.0.1";
+constexpr char kVersion[] = "1.0.2";
 
 // ---------------------------------------------------------------- settings and results
 
@@ -591,6 +591,19 @@ void SpriteTexels(IDirectDrawSurface7* s, const DD7& d, int size) {
     s->SetColorKey(DDCKEY_SRCBLT, &key);
 }
 
+// The tests' own arithmetic is kept small against what they measure: where a frame moves
+// thousands of things along sines, each angle is a sum of a part that changes with time (a
+// few values a frame) and a part that doesn't (a table made once), and the sine of the sum
+// comes from the sines and cosines of the parts. (1.0.1's d3d7-tl took 160,000 sines and
+// cosines a frame, most of its frame time with a fast wrapper.)
+struct Angle {
+    float s, c;
+    Angle() : s(0.0f), c(1.0f) {}
+    explicit Angle(double a) : s(float(sin(a))), c(float(cos(a))) {}
+};
+inline float SinSum(const Angle& a, const Angle& b) { return a.s * b.c + a.c * b.s; }
+inline float CosSum(const Angle& a, const Angle& b) { return a.c * b.c - a.s * b.s; }
+
 // ---------------------------------------------------------------- 2D tests
 
 uint32_t g_rng = 12345;
@@ -635,11 +648,17 @@ void Tests2D() {
         if (sprite) SpriteTexels(sprite, d, 32);
         return sprite != nullptr;
     };
+    // Sprite i moves along sin(a * 1.3 + i * 0.37) and cos(a * 0.9 + i * 0.61), with
+    // a = t * (0.5 + (i % 7) * 0.1) + i: seven speeds (the parts with t), and each sprite's
+    // own phase (the parts with i).
+    std::vector<Angle> spriteX(2000), spriteY(2000);
+    for (int i = 0; i < 2000; i++) spriteX[i] = Angle(i * (1.3 + 0.37)), spriteY[i] = Angle(i * (0.9 + 0.61));
     auto sprites = [&](DD7& d, int count, double t) {
+        Angle speedX[7], speedY[7];
+        for (int m = 0; m < 7; m++) speedX[m] = Angle(t * (0.5 + m * 0.1) * 1.3), speedY[m] = Angle(t * (0.5 + m * 0.1) * 0.9);
         for (int i = 0; i < count; i++) {
-            const double a = t * (0.5 + (i % 7) * 0.1) + i;
-            const int x = int((W - 32) * (0.5 + 0.5 * sin(a * 1.3 + i * 0.37)));
-            const int y = int((H - 32) * (0.5 + 0.5 * cos(a * 0.9 + i * 0.61)));
+            const int x = int(float(W - 32) * (0.5f + 0.5f * SinSum(speedX[i % 7], spriteX[i])));
+            const int y = int(float(H - 32) * (0.5f + 0.5f * CosSum(speedY[i % 7], spriteY[i])));
             RECT src = {0, 0, 32, 32};
             Ck("BltFast (colour-keyed)", d.back->BltFast(x, y, sprite, &src, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT));
         }
@@ -852,20 +871,28 @@ void TestsD3D7() {
     const int W = g_set.w, H = g_set.h;
     // Transformed and lit triangles (what 2D-on-3D games and many D3D 3-6 games send).
     std::vector<D3DTLVERTEX> tl(300);
+    // Triangle k of call `call` is centred at sin(t * 0.7 + call * 0.13 + k * 0.071) and
+    // cos(t * 0.5 + call * 0.29 + k * 0.053), its corner j at the angle j * 2.094 + t + k.
+    Angle triX[100], triY[100], corner[100][3];
+    for (int k = 0; k < 100; k++) {
+        triX[k] = Angle(k * 0.071), triY[k] = Angle(k * 0.053);
+        for (int j = 0; j < 3; j++) corner[k][j] = Angle(double(float(j) * 2.094f + float(k)));
+    }
     Test3D7(7, "d3d7-tl", "20000 transformed textured triangles a frame, 100 a DrawPrimitive", nullptr,
             [&](D3D7Ctx& c, int, double t) {
                 c.Begin(0xFF102030);
                 c.dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
                 c.dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+                const Angle spin(t);
                 for (int call = 0; call < 200; call++) {
+                    const Angle callX(t * 0.7 + call * 0.13), callY(t * 0.5 + call * 0.29);
                     for (int k = 0; k < 100; k++) {
-                        const float cx = float(W) * float(0.5 + 0.45 * sin(t * 0.7 + call * 0.13 + k * 0.071));
-                        const float cy = float(H) * float(0.5 + 0.45 * cos(t * 0.5 + call * 0.29 + k * 0.053));
+                        const float cx = float(W) * (0.5f + 0.45f * SinSum(callX, triX[k]));
+                        const float cy = float(H) * (0.5f + 0.45f * CosSum(callY, triY[k]));
                         for (int j = 0; j < 3; j++) {
                             D3DTLVERTEX& p = tl[k * 3 + j];
-                            const float a = float(j) * 2.094f + float(t) + float(k);
-                            p.sx = cx + 16.0f * cosf(a);
-                            p.sy = cy + 16.0f * sinf(a);
+                            p.sx = cx + 16.0f * CosSum(spin, corner[k][j]);
+                            p.sy = cy + 16.0f * SinSum(spin, corner[k][j]);
                             p.sz = 0.5f;
                             p.rhw = 1.0f;
                             p.color = 0xFF000000 | (DWORD(call * 5) & 0xFF) << 16 | DWORD(k * 2) << 8 | 0xC0;
@@ -916,15 +943,18 @@ void TestsD3D7() {
 
     // Many small draws with state changes between them (the cost per call and per change).
     D3DVERTEX quad[4] = {};
+    std::vector<Angle> quadZ(3000);  // quad i's depth moves along sin(t + i * 0.01)
+    for (int i = 0; i < 3000; i++) quadZ[i] = Angle(i * 0.01);
     Test3D7(10, "d3d7-states", "3000 two-triangle draws a frame, the texture and three blend states set before each", nullptr,
             [&](D3D7Ctx& c, int, double t) {
                 c.Begin(0xFF000000);
                 c.dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
                 D3DMATRIX w = Identity();
                 c.dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &w);
+                const Angle now(t);
                 for (int i = 0; i < 3000; i++) {
                     const float x = float(i % 60) * 0.12f - 3.6f, y = float(i / 60) * 0.1f - 2.5f;
-                    const float z = 5.0f + 0.5f * float(sin(t + i * 0.01));
+                    const float z = 5.0f + 0.5f * SinSum(now, quadZ[i]);
                     const float s = 0.05f;
                     const float px[4] = {x - s, x + s, x - s, x + s}, py[4] = {y + s, y + s, y - s, y - s};
                     for (int k = 0; k < 4; k++) {
